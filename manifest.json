@@ -1,0 +1,53 @@
+{
+  "plugin_id": "silo.theintrodb",
+  "version": "0.1.0",
+  "checksum": "__CHECKSUM__",
+  "silo_api_version": "v1",
+  "supported_platforms": [
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    },
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
+  ],
+  "capabilities": [
+    {
+      "type": "marker_provider.v1",
+      "id": "introdb",
+      "display_name": "TheIntroDB",
+      "description": "Fetches and submits intro, credits, recap, and preview markers using TheIntroDB.",
+      "metadata": {
+        "required_external_ids": ["tmdb"],
+        "default_fetch_priority": 100
+      }
+    }
+  ],
+  "global_config_schema": [
+    {
+      "key": "account",
+      "title": "TheIntroDB Account",
+      "description": "Optional TheIntroDB API key used for submissions and account statistics.",
+      "json_schema": "{\"type\":\"object\",\"properties\":{\"api_key\":{\"type\":\"string\"}},\"additionalProperties\":false}",
+      "required": false,
+      "admin_form": {
+        "submit_label": "Save TheIntroDB account",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API Key",
+            "description": "TheIntroDB API key from your profile.",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "secret": true
+          }
+        ]
+      }
+    }
+  ]
+}
