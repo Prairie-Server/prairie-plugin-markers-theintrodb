@@ -144,7 +144,7 @@ func (c *Client) fetch(ctx context.Context, q url.Values, key string) (*mediaRes
 			return nil, fmt.Errorf("introdb: create request: %w", err)
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "Silo-Server/markers")
+		req.Header.Set("User-Agent", "Prairie-Server/markers")
 		if apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
@@ -266,7 +266,7 @@ func (c *Client) submitSegment(ctx context.Context, body submitRequest) (*submit
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Silo-Server/markers")
+	req.Header.Set("User-Agent", "Prairie-Server/markers")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := c.httpClient.Do(req)
@@ -313,7 +313,7 @@ func (c *Client) fetchUserStats(ctx context.Context) (*userStatsResponse, error)
 		return nil, fmt.Errorf("introdb: create stats request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Silo-Server/markers")
+	req.Header.Set("User-Agent", "Prairie-Server/markers")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := c.httpClient.Do(req)
