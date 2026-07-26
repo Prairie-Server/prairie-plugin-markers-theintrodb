@@ -3,7 +3,7 @@ module github.com/prairie-server/prairie-plugin-markers-theintrodb
 go 1.26.0
 
 require (
-	github.com/prairie-server/prairie-plugin-sdk v0.12.1-0.20260726223239-3c6de05cade7
+	github.com/prairie-server/prairie-plugin-sdk v0.12.1-0.20260726225228-1dfb0aebf7e0
 	golang.org/x/time v0.14.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217
 	google.golang.org/grpc v1.75.1
