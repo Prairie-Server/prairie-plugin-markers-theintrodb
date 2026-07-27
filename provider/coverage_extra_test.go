@@ -244,6 +244,15 @@ func TestProviderBranches(t *testing.T) {
 	if name, err := segmentName(MarkerKindIntro); err != nil || name != "intro" {
 		t.Fatal(name, err)
 	}
+	if name, err := segmentName(MarkerKindCredits); err != nil || name != "credits" {
+		t.Fatal(name, err)
+	}
+	if name, err := segmentName(MarkerKindRecap); err != nil || name != "recap" {
+		t.Fatal(name, err)
+	}
+	if name, err := segmentName(MarkerKindPreview); err != nil || name != "preview" {
+		t.Fatal(name, err)
+	}
 	if _, err := segmentName(0); err == nil {
 		t.Fatal("unknown segment")
 	}
@@ -315,6 +324,21 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 	}
 	if _, err := c2.fetchUserStats(context.Background()); err == nil {
 		t.Fatal("expected missing api key stats")
+	}
+}
+
+func TestClientInvalidRequestURLs(t *testing.T) {
+	c := NewClient("k")
+	defer c.Close()
+	c.SetBaseURL("http://example.com/%zz")
+	if _, err := c.FetchMovie(context.Background(), "1", "", "", 0); err == nil {
+		t.Fatal("expected fetch request creation error")
+	}
+	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: 1, Type: "movie", Segment: "intro"}); err == nil {
+		t.Fatal("expected submit request creation error")
+	}
+	if _, err := c.fetchUserStats(context.Background()); err == nil {
+		t.Fatal("expected stats request creation error")
 	}
 }
 
