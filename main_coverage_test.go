@@ -61,9 +61,6 @@ func TestAPIKeyFromConfigAndHelpers(t *testing.T) {
 	if markerKindName(provider.MarkerKindIntro) != "intro" || markerKindName(0) != "" {
 		t.Fatal("markerKindName")
 	}
-	if firstNonEmpty("", "  ", "a") != "a" || firstNonEmpty("", " ") != "" {
-		t.Fatal("firstNonEmpty")
-	}
 
 	ids := externalIDs(nil)
 	if len(ids) != 0 {

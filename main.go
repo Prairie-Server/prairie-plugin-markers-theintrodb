@@ -16,10 +16,10 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"github.com/prairie-server/prairie-plugin-markers-theintrodb/provider"
 	pluginv1 "github.com/prairie-server/prairie-plugin-sdk/pkg/pluginproto/prairie/plugin/v1"
 	publicmanifest "github.com/prairie-server/prairie-plugin-sdk/pkg/pluginsdk/manifest"
 	"github.com/prairie-server/prairie-plugin-sdk/pkg/pluginsdk/runtime"
-	"github.com/prairie-server/prairie-plugin-markers-theintrodb/provider"
 )
 
 var version string
