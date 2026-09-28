@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -9,9 +10,8 @@ import (
 	"time"
 )
 
-func TestClientSetAPIKeyCloseAndCacheHelpers(t *testing.T) {
+func TestClientSetAPIKey(t *testing.T) {
 	c := NewClient("  initial  ")
-	defer c.Close()
 	c.SetAPIKey("  rotated  ")
 	c.mu.RLock()
 	if c.apiKey != "rotated" {
@@ -19,29 +19,10 @@ func TestClientSetAPIKeyCloseAndCacheHelpers(t *testing.T) {
 	}
 	c.mu.RUnlock()
 
-	if cacheKeyEpisode("", "", "tt1", 1, 2, 3) == "" {
-		t.Fatal("imdb episode key")
-	}
-	if cacheKeyMovie("1", "", "", 0) == "" || cacheKeyMovie("", "2", "", 0) == "" || cacheKeyMovie("", "", "tt3", 9) == "" {
-		t.Fatal("movie keys")
-	}
-	resp := &http.Response{Header: http.Header{}}
-	if retryAfterOrDefault(resp, 0) != time.Second {
-		t.Fatal("default backoff")
-	}
-	resp.Header.Set("Retry-After", "7")
-	if retryAfterOrDefault(resp, 0) != 7*time.Second {
-		t.Fatal("retry-after header")
-	}
-	resp.Header.Set("Retry-After", "nope")
-	if retryAfterOrDefault(resp, 1) != 2*time.Second {
-		t.Fatal("invalid retry-after")
-	}
 }
 
 func TestFetchEpisodeValidationAndMovieIMDB(t *testing.T) {
 	c := NewClient("")
-	defer c.Close()
 	if _, err := c.FetchEpisode(context.Background(), "", "", "", 1, 1, 0); err == nil {
 		t.Fatal("expected missing id error")
 	}
@@ -72,7 +53,6 @@ func TestFetchHTTPBranches(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := NewClient("")
-		defer c.Close()
 		c.SetBaseURL(srv.URL)
 		got, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0)
 		if err != nil || got != nil {
@@ -86,7 +66,6 @@ func TestFetchHTTPBranches(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := NewClient("k")
-		defer c.Close()
 		c.SetBaseURL(srv.URL)
 		if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
 			t.Fatal("expected http error")
@@ -99,14 +78,15 @@ func TestFetchHTTPBranches(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := NewClient("")
-		defer c.Close()
 		c.SetBaseURL(srv.URL)
 		if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
 			t.Fatal("expected decode error")
 		}
 	})
 
-	t.Run("rate limit then success", func(t *testing.T) {
+	// A 429 is surfaced to the host as RetryAfterError instead of being
+	// retried in-process, so the quota is honored.
+	t.Run("rate limit surfaces retry-after", func(t *testing.T) {
 		var hits int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			if atomic.AddInt32(&hits, 1) == 1 {
@@ -118,10 +98,14 @@ func TestFetchHTTPBranches(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := NewClient("")
-		defer c.Close()
 		c.SetBaseURL(srv.URL)
-		if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err != nil {
-			t.Fatalf("FetchEpisode: %v", err)
+		_, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0)
+		var retry *RetryAfterError
+		if !errors.As(err, &retry) || retry.RetryAfter != time.Second {
+			t.Fatalf("FetchEpisode err = %v, want RetryAfterError(1s)", err)
+		}
+		if got := atomic.LoadInt32(&hits); got != 1 {
+			t.Fatalf("hits = %d, want 1 (no in-process retry)", got)
 		}
 	})
 
@@ -136,7 +120,6 @@ func TestFetchHTTPBranches(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := NewClient("")
-		defer c.Close()
 		c.SetBaseURL(srv.URL)
 		if _, err := c.FetchEpisode(context.Background(), "2", "", "", 1, 1, 0); err != nil {
 			t.Fatalf("FetchEpisode: %v", err)
@@ -153,7 +136,6 @@ func TestProviderBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := NewProvider(NewClient(""))
-	defer p.client.Close()
 	if res, err := p.FetchMarkers(context.Background(), Request{Kind: ItemKindEpisode}); err != nil || len(res.Markers) != 0 {
 		t.Fatalf("%v %#v", err, res)
 	}
@@ -184,7 +166,6 @@ func TestProviderBranches(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient("k")
-	defer c.Close()
 	c.SetBaseURL(srv.URL)
 	p = NewProvider(c)
 
@@ -268,23 +249,22 @@ func TestProviderBranches(t *testing.T) {
 	}
 }
 
-func TestPickMarkerEdgeCases(t *testing.T) {
+func TestConvertMarkersEdgeCases(t *testing.T) {
 	end := int64(1000)
 	start := int64(2000)
-	if _, ok := pickMarker([]segmentTimestamps{{}}, MarkerKindIntro, time.Minute, true); ok {
+	if got := convertMarkers([]segmentTimestamps{{}}, MarkerKindIntro, time.Minute); len(got) != 0 {
 		t.Fatal("require end")
 	}
-	if _, ok := pickMarker([]segmentTimestamps{{EndMs: &end}}, MarkerKindCredits, time.Minute, false); ok {
+	if got := convertMarkers([]segmentTimestamps{{EndMs: &end}}, MarkerKindCredits, time.Minute); len(got) != 0 {
 		t.Fatal("require start")
 	}
-	if _, ok := pickMarker([]segmentTimestamps{{StartMs: &start, EndMs: &end}}, MarkerKindIntro, time.Minute, true); ok {
+	if got := convertMarkers([]segmentTimestamps{{StartMs: &start, EndMs: &end}}, MarkerKindIntro, time.Minute); len(got) != 0 {
 		t.Fatal("end <= start")
 	}
 }
 
-func TestCacheExpiryAndClose(t *testing.T) {
-	c := newTTLCache[*mediaResponse]()
-	defer c.Close()
+func TestCacheExpiry(t *testing.T) {
+	c := newResponseCache(4)
 	c.Set("k", &mediaResponse{Type: "episode"}, time.Millisecond)
 	time.Sleep(5 * time.Millisecond)
 	if _, ok := c.Get("k"); ok {
@@ -307,7 +287,6 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient("k")
-	defer c.Close()
 	c.SetBaseURL(srv.URL)
 	if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
 		t.Fatal("expected rate limit exhaustion")
@@ -317,7 +296,6 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 	}
 
 	c2 := NewClient("")
-	defer c2.Close()
 	c2.SetBaseURL(srv.URL)
 	if _, err := c2.submitSegment(context.Background(), submitRequest{TmdbID: 1}); err == nil {
 		t.Fatal("expected missing api key")
@@ -329,7 +307,6 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 
 func TestClientInvalidRequestURLs(t *testing.T) {
 	c := NewClient("k")
-	defer c.Close()
 	c.SetBaseURL("http://example.com/%zz")
 	if _, err := c.FetchMovie(context.Background(), "1", "", "", 0); err == nil {
 		t.Fatal("expected fetch request creation error")
@@ -352,7 +329,6 @@ func TestFetchServerErrorExhaustedAndStatsErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient("k")
-	defer c.Close()
 	c.SetBaseURL(srv.URL)
 	if _, err := c.FetchMovie(context.Background(), "1", "", "", 0); err == nil {
 		t.Fatal("expected 500 exhaustion")
@@ -388,7 +364,6 @@ func TestFetchServerErrorExhaustedAndStatsErrors(t *testing.T) {
 
 func TestCanceledLimiterWait(t *testing.T) {
 	c := NewClient("")
-	defer c.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := c.FetchEpisode(ctx, "1", "", "", 1, 1, 0); err == nil {
@@ -396,21 +371,15 @@ func TestCanceledLimiterWait(t *testing.T) {
 	}
 }
 
-func TestNilCacheAndUsageReset(t *testing.T) {
-	var c *ttlCache[*mediaResponse]
-	if _, ok := c.Get("x"); ok {
-		t.Fatal("nil get")
+func TestRetryDelayDefaults(t *testing.T) {
+	now := time.Now()
+	if got := retryDelay(http.Header{}, now); got != 10*time.Second {
+		t.Fatalf("default delay = %v", got)
 	}
-	c.Set("x", nil, time.Second)
-	c.Close()
-
-	resp := &http.Response{Header: http.Header{}}
-	if usageResetSeconds(resp) != 0 {
-		t.Fatal("default reset")
-	}
-	resp.Header.Set("Retry-After", "0")
-	if usageResetSeconds(resp) != 0 {
-		t.Fatal("zero reset")
+	h := http.Header{}
+	h.Set("Retry-After", "0")
+	if got := retryDelay(h, now); got != 10*time.Second {
+		t.Fatalf("zero retry-after = %v", got)
 	}
 }
 
@@ -420,7 +389,6 @@ func TestProviderFetchErrorAndNilResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient("")
-	defer c.Close()
 	c.SetBaseURL(srv.URL)
 	p := NewProvider(c)
 	if _, err := p.FetchMarkers(context.Background(), Request{
