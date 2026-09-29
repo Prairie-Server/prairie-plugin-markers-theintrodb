@@ -171,8 +171,8 @@ func (p *Provider) SubmitMarker(ctx context.Context, req SubmissionRequest) (Sub
 	if resp == nil || len(resp.Submissions) == 0 {
 		return SubmissionResult{Status: SubmissionStatusPending}, nil
 	}
-	s := resp.Submissions[0]
-	return SubmissionResult{ID: s.ID, Status: s.Status, Weight: s.Weight}, nil
+	// The wire and public types share fields; a conversion fails to compile if they diverge.
+	return SubmissionResult(resp.Submissions[0]), nil
 }
 
 // FetchUserStats validates the configured key and returns contribution stats.
