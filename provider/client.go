@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,6 +24,15 @@ const (
 	defaultTimeout  = 15 * time.Second
 	defaultCacheTTL = 24 * time.Hour
 	maxCacheEntries = 1024
+	clientUserAgent = "Silo-Server-TheIntroDB-Plugin/1.0 (+https://github.com/Silo-Server/silo-plugin-markers-theintrodb)"
+	// Missing and partial responses are deliberately short-lived. A later
+	// playback should be able to discover newly contributed intro or credits
+	// markers without hammering TheIntroDB on repeated starts.
+	defaultIncompleteCacheTTL = 15 * time.Minute
+	// A Cloudflare block is not content-specific. Further lookups only add
+	// rejected traffic and can prolong an automated block, so the host pauses
+	// the provider for this long.
+	defaultBlockedCooldown = 5 * time.Minute
 )
 
 // Client is an HTTP client for the TheIntroDB /v3/media endpoint. Each
@@ -146,7 +157,7 @@ func (c *Client) fetch(ctx context.Context, q url.Values) (*mediaResponse, error
 		defer cancel()
 		response, err := c.fetchMedia(fetchCtx, baseURL+"/media?"+key, apiKey)
 		if err == nil {
-			cache.Set(key, response, defaultCacheTTL)
+			cache.Set(key, response, responseCacheTTL(response))
 		}
 		return response, err
 	})
@@ -192,6 +203,11 @@ func (c *Client) fetchMedia(ctx context.Context, reqURL, apiKey string) (*mediaR
 			continue
 		}
 
+		if resp.StatusCode == http.StatusForbidden && !isJSONResponse(resp) && isCloudflareResponse(resp) {
+			closeResponse(resp)
+			return nil, cloudflareBlockError(resp)
+		}
+
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 			closeResponse(resp)
@@ -206,6 +222,53 @@ func (c *Client) fetchMedia(ctx context.Context, reqURL, apiKey string) (*mediaR
 		}
 		return &out, nil
 	}
+}
+
+// Every API response passes through Cloudflare, so the Server header cannot
+// distinguish a block from an origin error. The origin reports errors as JSON;
+// a Cloudflare block is an HTML page.
+func isJSONResponse(resp *http.Response) bool {
+	// A malformed parameter (e.g. a bare "; charset") still yields the media
+	// type alongside ErrInvalidMediaParameter, so only an empty type is fatal.
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mediaType == "" {
+		return false
+	}
+	return strings.EqualFold(mediaType, "application/json") || strings.HasSuffix(strings.ToLower(mediaType), "+json")
+}
+
+// isCloudflareResponse reports whether the response passed through Cloudflare.
+// Without that provenance a non-JSON 403 is an ordinary error and keeps its
+// body instead of pausing the provider.
+func isCloudflareResponse(resp *http.Response) bool {
+	return strings.TrimSpace(resp.Header.Get("CF-Ray")) != "" ||
+		strings.Contains(strings.ToLower(resp.Header.Get("Server")), "cloudflare")
+}
+
+// cloudflareBlockError asks the host to pause the provider instead of letting
+// every queued lookup reach the block. The HTML block page is dropped; the
+// CF-Ray value is enough to diagnose it.
+func cloudflareBlockError(resp *http.Response) error {
+	message := fmt.Sprintf("introdb: Cloudflare blocked request (HTTP 403); retry after %s", defaultBlockedCooldown)
+	if ray := strings.TrimSpace(resp.Header.Get("CF-Ray")); ray != "" {
+		message = fmt.Sprintf("introdb: Cloudflare blocked request (HTTP 403, cf-ray %s); retry after %s", ray, defaultBlockedCooldown)
+	}
+	return &RetryAfterError{RetryAfter: defaultBlockedCooldown, Message: message}
+}
+
+// responseCacheTTL keeps a response for the full TTL only when it has a
+// usable intro and credits. TheIntroDB marks a missing credits segment with a
+// zero-start entry that convertMarkers discards, so counting array entries
+// would cache that miss for a day. The file duration isn't known here, so an
+// open-ended segment counts as usable.
+func responseCacheTTL(response *mediaResponse) time.Duration {
+	unbounded := time.Duration(math.MaxInt64)
+	if response == nil ||
+		len(convertMarkers(response.Intro, MarkerKindIntro, unbounded)) == 0 ||
+		len(convertMarkers(response.Credits, MarkerKindCredits, unbounded)) == 0 {
+		return defaultIncompleteCacheTTL
+	}
+	return defaultCacheTTL
 }
 
 // closeResponse releases a response body that the caller is not returning. The
@@ -304,7 +367,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body io.Reader
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Silo-Server/markers")
+	req.Header.Set("User-Agent", clientUserAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
