@@ -161,7 +161,7 @@ func TestFetchMarkersMovie(t *testing.T) {
 	}, "")
 	resp, err := server.FetchMarkers(context.Background(), &pluginv1.FetchMarkersRequest{
 		ItemType:        "movie",
-		ExternalIds:     &pluginv1.MarkerExternalIDs{ImdbId: "tt1"},
+		ExternalIds:     &pluginv1.MarkerExternalIDs{ImdbId: "tt1234567"},
 		DurationSeconds: 7200,
 	})
 	if err != nil {

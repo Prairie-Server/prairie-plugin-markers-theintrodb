@@ -23,25 +23,25 @@ func TestClientSetAPIKey(t *testing.T) {
 
 func TestFetchEpisodeValidationAndMovieIMDB(t *testing.T) {
 	c := NewClient("")
-	if _, err := c.FetchEpisode(context.Background(), "", "", "", 1, 1, 0); err == nil {
+	if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "", "", ""), 1, 1, 0); err == nil {
 		t.Fatal("expected missing id error")
 	}
-	if _, err := c.FetchEpisode(context.Background(), "1", "", "", 0, 1, 0); err == nil {
+	if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 0, 0); err == nil {
 		t.Fatal("expected season/episode error")
 	}
-	if _, err := c.FetchMovie(context.Background(), "", "", "", 0); err == nil {
+	if _, err := c.FetchMovie(context.Background(), idTarget(ItemKindMovie, "", "", ""), 0); err == nil {
 		t.Fatal("expected missing id error")
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("imdb_id") != "tt9" {
+		if r.URL.Query().Get("imdb_id") != "tt1234567" {
 			t.Errorf("query = %v", r.URL.Query())
 		}
 		_, _ = w.Write([]byte(`{"type":"movie","intro":[{"end_ms":1000}]}`))
 	}))
 	defer srv.Close()
 	c.SetBaseURL(srv.URL)
-	if _, err := c.FetchMovie(context.Background(), "", "", "tt9", 1000); err != nil {
+	if _, err := c.FetchMovie(context.Background(), idTarget(ItemKindMovie, "", "", "tt1234567"), 1000); err != nil {
 		t.Fatalf("FetchMovie: %v", err)
 	}
 }
@@ -49,12 +49,13 @@ func TestFetchEpisodeValidationAndMovieIMDB(t *testing.T) {
 func TestFetchHTTPBranches(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 		}))
 		defer srv.Close()
 		c := NewClient("")
 		c.SetBaseURL(srv.URL)
-		got, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0)
+		got, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0)
 		if err != nil || got != nil {
 			t.Fatalf("got=%v err=%v", got, err)
 		}
@@ -67,7 +68,7 @@ func TestFetchHTTPBranches(t *testing.T) {
 		defer srv.Close()
 		c := NewClient("k")
 		c.SetBaseURL(srv.URL)
-		if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
+		if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0); err == nil {
 			t.Fatal("expected http error")
 		}
 	})
@@ -79,7 +80,7 @@ func TestFetchHTTPBranches(t *testing.T) {
 		defer srv.Close()
 		c := NewClient("")
 		c.SetBaseURL(srv.URL)
-		if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
+		if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0); err == nil {
 			t.Fatal("expected decode error")
 		}
 	})
@@ -99,7 +100,7 @@ func TestFetchHTTPBranches(t *testing.T) {
 		defer srv.Close()
 		c := NewClient("")
 		c.SetBaseURL(srv.URL)
-		_, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0)
+		_, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0)
 		var retry *RetryAfterError
 		if !errors.As(err, &retry) || retry.RetryAfter != time.Second {
 			t.Fatalf("FetchEpisode err = %v, want RetryAfterError(1s)", err)
@@ -121,7 +122,7 @@ func TestFetchHTTPBranches(t *testing.T) {
 		defer srv.Close()
 		c := NewClient("")
 		c.SetBaseURL(srv.URL)
-		if _, err := c.FetchEpisode(context.Background(), "2", "", "", 1, 1, 0); err != nil {
+		if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "2", "", ""), 1, 1, 0); err != nil {
 			t.Fatalf("FetchEpisode: %v", err)
 		}
 	})
@@ -198,7 +199,7 @@ func TestProviderBranches(t *testing.T) {
 		t.Fatal("bad kind")
 	}
 
-	start := time.Duration(0)
+	start := 10 * time.Minute
 	end := 2 * time.Hour
 	sub, err := p.SubmitMarker(context.Background(), SubmissionRequest{
 		Kind: ItemKindMovie, ExternalIDs: map[string]string{ExternalIDKeyTMDB: "12", ExternalIDKeyIMDB: "tt1"},
@@ -288,16 +289,16 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 	defer srv.Close()
 	c := NewClient("k")
 	c.SetBaseURL(srv.URL)
-	if _, err := c.FetchEpisode(context.Background(), "1", "", "", 1, 1, 0); err == nil {
+	if _, err := c.FetchEpisode(context.Background(), idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0); err == nil {
 		t.Fatal("expected rate limit exhaustion")
 	}
-	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: 1, Type: "movie", Segment: "intro"}); err == nil {
+	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: ptrInt64(1), Type: "movie", Segment: "intro"}); err == nil {
 		t.Fatal("expected submit rate limit")
 	}
 
 	c2 := NewClient("")
 	c2.SetBaseURL(srv.URL)
-	if _, err := c2.submitSegment(context.Background(), submitRequest{TmdbID: 1}); err == nil {
+	if _, err := c2.submitSegment(context.Background(), submitRequest{TmdbID: ptrInt64(1)}); err == nil {
 		t.Fatal("expected missing api key")
 	}
 	if _, err := c2.fetchUserStats(context.Background()); err == nil {
@@ -308,10 +309,10 @@ func TestFetchExhaustedRetriesAndSubmitErrors(t *testing.T) {
 func TestClientInvalidRequestURLs(t *testing.T) {
 	c := NewClient("k")
 	c.SetBaseURL("http://example.com/%zz")
-	if _, err := c.FetchMovie(context.Background(), "1", "", "", 0); err == nil {
+	if _, err := c.FetchMovie(context.Background(), idTarget(ItemKindMovie, "1", "", ""), 0); err == nil {
 		t.Fatal("expected fetch request creation error")
 	}
-	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: 1, Type: "movie", Segment: "intro"}); err == nil {
+	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: ptrInt64(1), Type: "movie", Segment: "intro"}); err == nil {
 		t.Fatal("expected submit request creation error")
 	}
 	if _, err := c.fetchUserStats(context.Background()); err == nil {
@@ -330,7 +331,7 @@ func TestFetchServerErrorExhaustedAndStatsErrors(t *testing.T) {
 	defer srv.Close()
 	c := NewClient("k")
 	c.SetBaseURL(srv.URL)
-	if _, err := c.FetchMovie(context.Background(), "1", "", "", 0); err == nil {
+	if _, err := c.FetchMovie(context.Background(), idTarget(ItemKindMovie, "1", "", ""), 0); err == nil {
 		t.Fatal("expected 500 exhaustion")
 	}
 	if _, err := c.fetchUserStats(context.Background()); err == nil {
@@ -345,7 +346,7 @@ func TestFetchServerErrorExhaustedAndStatsErrors(t *testing.T) {
 	if _, err := c.fetchUserStats(context.Background()); err == nil {
 		t.Fatal("expected stats http error")
 	}
-	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: 1, Type: "movie", Segment: "intro"}); err == nil {
+	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: ptrInt64(1), Type: "movie", Segment: "intro"}); err == nil {
 		t.Fatal("expected submit http error")
 	}
 
@@ -357,7 +358,7 @@ func TestFetchServerErrorExhaustedAndStatsErrors(t *testing.T) {
 	if _, err := c.fetchUserStats(context.Background()); err == nil {
 		t.Fatal("expected stats decode error")
 	}
-	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: 1, Type: "movie", Segment: "intro"}); err == nil {
+	if _, err := c.submitSegment(context.Background(), submitRequest{TmdbID: ptrInt64(1), Type: "movie", Segment: "intro"}); err == nil {
 		t.Fatal("expected submit decode error")
 	}
 }
@@ -366,7 +367,7 @@ func TestCanceledLimiterWait(t *testing.T) {
 	c := NewClient("")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.FetchEpisode(ctx, "1", "", "", 1, 1, 0); err == nil {
+	if _, err := c.FetchEpisode(ctx, idTarget(ItemKindEpisode, "1", "", ""), 1, 1, 0); err == nil {
 		t.Fatal("expected cancel")
 	}
 }
@@ -399,6 +400,7 @@ func TestProviderFetchErrorAndNilResponse(t *testing.T) {
 	}
 
 	nf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer nf.Close()
@@ -420,3 +422,4 @@ func TestProviderFetchErrorAndNilResponse(t *testing.T) {
 		t.Fatal("expected stats error")
 	}
 }
+func ptrInt64(v int64) *int64 { return &v }

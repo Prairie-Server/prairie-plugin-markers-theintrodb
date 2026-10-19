@@ -61,11 +61,12 @@ func (s *markerServer) FetchMarkers(ctx context.Context, req *pluginv1.FetchMark
 		start := marker.Start.Seconds()
 		end := marker.End.Seconds()
 		out.Markers = append(out.Markers, &pluginv1.MarkerSegment{
-			Segment:      markerKindName(marker.Kind),
-			StartSeconds: &start,
-			EndSeconds:   &end,
-			Confidence:   marker.Confidence,
-			Algorithm:    marker.Algorithm,
+			Segment:         markerKindName(marker.Kind),
+			StartSeconds:    &start,
+			EndSeconds:      &end,
+			Confidence:      marker.Confidence,
+			SubmissionCount: int32(marker.SubmissionCount),
+			Algorithm:       marker.Algorithm,
 		})
 	}
 	return out, nil
@@ -157,6 +158,7 @@ func requestFromProto(req *pluginv1.FetchMarkersRequest) provider.Request {
 		ExternalIDs:   externalIDs(req.GetExternalIds()),
 		SeasonNumber:  int(req.GetSeasonNumber()),
 		EpisodeNumber: int(req.GetEpisodeNumber()),
+		Episode:       episodeFromProto(req.GetEpisodeExternalIds(), req.GetEpisodeNumbering(), req.GetEpisodeTitle()),
 		Duration:      secondsDuration(req.GetDurationSeconds()),
 	}
 }
@@ -167,6 +169,7 @@ func submissionFromProto(req *pluginv1.SubmitMarkerRequest) provider.SubmissionR
 		ExternalIDs:   externalIDs(req.GetExternalIds()),
 		SeasonNumber:  int(req.GetSeasonNumber()),
 		EpisodeNumber: int(req.GetEpisodeNumber()),
+		Episode:       episodeFromProto(req.GetEpisodeExternalIds(), req.GetEpisodeNumbering(), req.GetEpisodeTitle()),
 		Segment:       markerKind(req.GetSegment()),
 		Duration:      secondsDuration(req.GetDurationSeconds()),
 	}
@@ -179,6 +182,14 @@ func submissionFromProto(req *pluginv1.SubmitMarkerRequest) provider.SubmissionR
 		out.End = &end
 	}
 	return out
+}
+
+func episodeFromProto(ids *pluginv1.MarkerExternalIDs, numbering, title string) provider.Episode {
+	return provider.Episode{
+		ExternalIDs: externalIDs(ids),
+		Numbering:   strings.TrimSpace(numbering),
+		Title:       strings.TrimSpace(title),
+	}
 }
 
 func externalIDs(ids *pluginv1.MarkerExternalIDs) map[string]string {
@@ -251,6 +262,11 @@ func secondsDuration(seconds float64) time.Duration {
 }
 
 func providerError(err error) error {
+	// InvalidArgument tells the host to record a permanent refusal rather
+	// than retry a submission that cannot succeed.
+	if errors.Is(err, provider.ErrUnsubmittable) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	var retryErr *provider.RetryAfterError
 	if !errors.As(err, &retryErr) || retryErr == nil {
 		return err
