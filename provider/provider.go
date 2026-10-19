@@ -3,8 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -29,10 +27,8 @@ func (p *Provider) FetchMarkers(ctx context.Context, req Request) (Result, error
 		return Result{}, nil
 	}
 
-	tmdbID := strings.TrimSpace(req.ExternalIDs[ExternalIDKeyTMDB])
-	tvdbID := strings.TrimSpace(req.ExternalIDs[ExternalIDKeyTVDB])
-	imdbID := strings.TrimSpace(req.ExternalIDs[ExternalIDKeyIMDB])
-	if tmdbID == "" && tvdbID == "" && imdbID == "" {
+	target, ok := NewTarget(req.Kind, req.ExternalIDs, req.Episode)
+	if !ok {
 		return Result{}, nil
 	}
 
@@ -42,12 +38,12 @@ func (p *Provider) FetchMarkers(ctx context.Context, req Request) (Result, error
 	var err error
 	switch req.Kind {
 	case ItemKindEpisode:
-		if req.SeasonNumber <= 0 || req.EpisodeNumber <= 0 {
+		if !validCoordinates(req.SeasonNumber, req.EpisodeNumber) {
 			return Result{}, nil
 		}
-		resp, err = p.client.FetchEpisode(ctx, tmdbID, tvdbID, imdbID, req.SeasonNumber, req.EpisodeNumber, durationMS)
+		resp, err = p.client.FetchEpisode(ctx, target, req.SeasonNumber, req.EpisodeNumber, durationMS)
 	case ItemKindMovie:
-		resp, err = p.client.FetchMovie(ctx, tmdbID, tvdbID, imdbID, durationMS)
+		resp, err = p.client.FetchMovie(ctx, target, durationMS)
 	default:
 		return Result{}, nil
 	}
@@ -58,16 +54,38 @@ func (p *Provider) FetchMarkers(ctx context.Context, req Request) (Result, error
 		return Result{}, nil
 	}
 
+	endsApply := sameRelease(resp, req.Duration)
 	result := Result{}
 	result.Markers = append(result.Markers, convertMarkers(resp.Intro, MarkerKindIntro, req.Duration)...)
-	result.Markers = append(result.Markers, convertMarkers(resp.Credits, MarkerKindCredits, req.Duration)...)
+	if endsApply {
+		result.Markers = append(result.Markers, convertMarkers(resp.Credits, MarkerKindCredits, req.Duration)...)
+	}
 	result.Markers = append(result.Markers, convertMarkers(resp.Recap, MarkerKindRecap, req.Duration)...)
-	result.Markers = append(result.Markers, convertMarkers(resp.Preview, MarkerKindPreview, req.Duration)...)
+	if endsApply {
+		result.Markers = append(result.Markers, convertMarkers(resp.Preview, MarkerKindPreview, req.Duration)...)
+	}
 	return result, nil
 }
 
-// The API has already selected a release using duration_ms. Each array entry is
-// a separate occurrence; in particular, credits may surround a scene to keep.
+// releaseTolerance is how far apart TheIntroDB treats two durations as one
+// release.
+const releaseTolerance = 5 * time.Minute
+
+// sameRelease reports whether the response's timestamps come from a release
+// whose length matches the file. With no release within the tolerance,
+// TheIntroDB answers with its most-submitted release instead. Intros and
+// recaps, timed from the start, still apply, but credits and previews, which
+// sit toward the end, would land in the wrong place.
+func sameRelease(resp *mediaResponse, duration time.Duration) bool {
+	if resp.GroupDurationMs == nil || *resp.GroupDurationMs <= 0 || duration <= 0 {
+		return true
+	}
+	diff := time.Duration(*resp.GroupDurationMs)*time.Millisecond - duration
+	return diff.Abs() <= releaseTolerance
+}
+
+// Each array entry is a separate occurrence; in particular, credits may
+// surround a scene to keep.
 func convertMarkers(stamps []segmentTimestamps, kind MarkerKind, totalDuration time.Duration) []Marker {
 	requireEnd := kind == MarkerKindIntro || kind == MarkerKindRecap
 	var markers []Marker
@@ -90,10 +108,23 @@ func convertMarkers(stamps []segmentTimestamps, kind MarkerKind, totalDuration t
 		if !requireEnd && (s.StartMs == nil || start == 0) {
 			continue
 		}
+		// Credits and previews run to the end of the release they were timed
+		// on, so one that ends a little past this file still ends with it.
+		// Prairie stores whole-second durations, which makes this common.
+		if !requireEnd && totalDuration > 0 && start < totalDuration && end > totalDuration && end-totalDuration <= releaseTolerance {
+			end = totalDuration
+		}
 		if end <= start || (totalDuration > 0 && end > totalDuration) {
 			continue
 		}
-		markers = append(markers, Marker{Kind: kind, Start: start, End: end, Confidence: defaultConfidence, Algorithm: Algorithm})
+		marker := Marker{Kind: kind, Start: start, End: end, Confidence: defaultConfidence, Algorithm: Algorithm}
+		if s.Confidence != nil && *s.Confidence >= 0 && *s.Confidence <= 1 {
+			marker.Confidence = *s.Confidence
+		}
+		if s.SubmissionCount != nil && *s.SubmissionCount > 0 {
+			marker.SubmissionCount = *s.SubmissionCount
+		}
+		markers = append(markers, marker)
 	}
 	return markers
 }
@@ -103,32 +134,37 @@ func validTimestamp(ms *int64) bool {
 	return ms == nil || (*ms >= 0 && *ms <= maxMilliseconds)
 }
 
-// SubmitMarker contributes a single segment to TheIntroDB via POST /v3/submit.
-// A TMDB id is required (the submission endpoint is keyed on TMDB). Per the
+// TheIntroDB accepts a video duration from 5 minutes to 6 hours, and no
+// timestamp past 6 hours.
+const (
+	minSubmitVideoDuration = 5 * time.Minute
+	maxSubmitVideoDuration = 6 * time.Hour
+	maxSubmitTimestamp     = 6 * time.Hour
+)
+
+// SubmitMarker contributes a single segment to TheIntroDB via POST /v4/submit,
+// addressing the item the same way a lookup does (see NewTarget). Per the
 // TheIntroDB convention, intro/recap submissions drop a zero start (= from the
 // beginning) and credits/preview drop an end at file duration (= to the end).
 func (p *Provider) SubmitMarker(ctx context.Context, req SubmissionRequest) (SubmissionResult, error) {
 	if p == nil || p.client == nil {
 		return SubmissionResult{}, fmt.Errorf("introdb: provider not configured")
 	}
-	tmdbID, err := strconv.Atoi(strings.TrimSpace(req.ExternalIDs[ExternalIDKeyTMDB]))
-	if err != nil || tmdbID <= 0 {
-		return SubmissionResult{}, fmt.Errorf("introdb: submit requires a TMDB id")
+	target, ok := NewTarget(req.Kind, req.ExternalIDs, req.Episode)
+	if !ok {
+		return SubmissionResult{}, fmt.Errorf("%w: submit requires a TVDB, TMDB, or IMDb id", ErrUnsubmittable)
 	}
 	segment, err := segmentName(req.Segment)
 	if err != nil {
 		return SubmissionResult{}, err
 	}
 
-	body := submitRequest{
-		TmdbID:  tmdbID,
-		ImdbID:  strings.TrimSpace(req.ExternalIDs[ExternalIDKeyIMDB]),
-		Segment: segment,
-	}
+	body := submitRequest{Segment: segment}
+	target.applyTo(&body)
 	switch req.Kind {
 	case ItemKindEpisode:
-		if req.SeasonNumber <= 0 || req.EpisodeNumber <= 0 {
-			return SubmissionResult{}, fmt.Errorf("introdb: episode submit requires season and episode")
+		if !validCoordinates(req.SeasonNumber, req.EpisodeNumber) {
+			return SubmissionResult{}, fmt.Errorf("%w: season %d episode %d is outside TheIntroDB's range", ErrUnsubmittable, req.SeasonNumber, req.EpisodeNumber)
 		}
 		body.Type = "tv"
 		season, episode := req.SeasonNumber, req.EpisodeNumber
@@ -137,31 +173,16 @@ func (p *Provider) SubmitMarker(ctx context.Context, req SubmissionRequest) (Sub
 	case ItemKindMovie:
 		body.Type = "movie"
 	default:
-		return SubmissionResult{}, fmt.Errorf("introdb: unsupported item kind")
+		return SubmissionResult{}, fmt.Errorf("%w: unsupported item kind", ErrUnsubmittable)
 	}
-	if req.Duration > 0 {
+	if req.Duration >= minSubmitVideoDuration && req.Duration <= maxSubmitVideoDuration {
 		durMs := int64(req.Duration / time.Millisecond)
 		body.VideoDurationMs = &durMs
 	}
 
-	start, end := req.Start, req.End
-	switch req.Segment {
-	case MarkerKindIntro, MarkerKindRecap:
-		if start != nil && *start <= 0 {
-			start = nil // beginning of file
-		}
-	case MarkerKindCredits, MarkerKindPreview:
-		if end != nil && req.Duration > 0 && *end >= req.Duration {
-			end = nil // runs to end of file
-		}
-	}
-	if start != nil {
-		ms := int64(*start / time.Millisecond)
-		body.StartMs = &ms
-	}
-	if end != nil {
-		ms := int64(*end / time.Millisecond)
-		body.EndMs = &ms
+	body.StartMs, body.EndMs, err = submissionBounds(req, segment)
+	if err != nil {
+		return SubmissionResult{}, err
 	}
 
 	resp, err := p.client.submitSegment(ctx, body)
@@ -173,6 +194,50 @@ func (p *Provider) SubmitMarker(ctx context.Context, req SubmissionRequest) (Sub
 	}
 	// The wire and public types share fields; a conversion fails to compile if they diverge.
 	return SubmissionResult(resp.Submissions[0]), nil
+}
+
+// submissionBounds converts a segment to TheIntroDB's millisecond bounds. A
+// null start means the beginning of the file (intro, recap) and a null end the
+// end of it (credits, preview). TheIntroDB reads a zero intro or recap end, a
+// zero credits or preview start, and an empty range as a vote that the segment
+// is absent, so those are refused rather than sent.
+func submissionBounds(req SubmissionRequest, segment string) (start, end *int64, err error) {
+	start, end = roundedMilliseconds(req.Start), roundedMilliseconds(req.End)
+	switch req.Segment {
+	case MarkerKindIntro, MarkerKindRecap:
+		if start != nil && *start <= 0 {
+			start = nil
+		}
+		if end == nil || *end <= 0 {
+			return nil, nil, fmt.Errorf("%w: %s needs an end after the start of the file", ErrUnsubmittable, segment)
+		}
+	case MarkerKindCredits, MarkerKindPreview:
+		if durationMs := req.Duration.Round(time.Millisecond).Milliseconds(); end != nil && durationMs > 0 && *end >= durationMs {
+			end = nil
+		}
+		if start == nil || *start <= 0 {
+			return nil, nil, fmt.Errorf("%w: %s needs a start after the beginning of the file", ErrUnsubmittable, segment)
+		}
+	}
+	if start != nil && end != nil && *end <= *start {
+		return nil, nil, fmt.Errorf("%w: %s ends before it starts", ErrUnsubmittable, segment)
+	}
+	for _, bound := range []*int64{start, end} {
+		if bound != nil && *bound > maxSubmitTimestamp.Milliseconds() {
+			return nil, nil, fmt.Errorf("%w: %s runs past %s", ErrUnsubmittable, segment, maxSubmitTimestamp)
+		}
+	}
+	return start, end, nil
+}
+
+// roundedMilliseconds rounds to the nearest millisecond: Prairie's seconds pass
+// through floating point, and truncating could turn 5 s into 4999 ms.
+func roundedMilliseconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	ms := d.Round(time.Millisecond).Milliseconds()
+	return &ms
 }
 
 // FetchUserStats validates the configured key and returns contribution stats.
@@ -206,6 +271,6 @@ func segmentName(kind MarkerKind) (string, error) {
 	case MarkerKindPreview:
 		return "preview", nil
 	default:
-		return "", fmt.Errorf("introdb: unknown segment kind %d", kind)
+		return "", fmt.Errorf("%w: unknown segment kind %d", ErrUnsubmittable, kind)
 	}
 }
